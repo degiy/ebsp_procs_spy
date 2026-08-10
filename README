@@ -1,0 +1,12 @@
+# based on https://github.com/libbpf/libbpf-bootstrap #
+
+need to place files inside the examples/c directory and run make i
+
+will scan for a given user (uid), all new process spawn for this user
+
+and for each new process it will dump all opened files, and UDP network flows (send and received)
+
+finish with CTRL+C will dump the remaining open process
+
+use C++ 17 features on user side
+
