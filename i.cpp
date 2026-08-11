@@ -15,17 +15,44 @@
 #include <arpa/inet.h>
 
 using namespace std;
+// we only store refs to strings (16 bits only, will need to increase if two much info to fetch)
 using StringId = uint16_t;
 
+// we will keep all strings for ever in a vector (only ref) for both open files and process names
 vector<const string*> vec_strings;
+// the map that old the real strings
 unordered_map<string, StringId> map_strings;
+// the id of the next index to use in vector to ref the string
 StringId cp_strings=0;
 
+#define KD_TCP 2 // bit mask : 1 for TCP / 0 for UDP
+#define KD_OUT 1 // bit mask : 1 for OUT / 0 for IN
+
+// Network class 
+struct alignas(8) IpPort
+{
+    __u32 ip;
+    __u16 port;
+    __u16 kind;
+    bool operator==(const IpPort& o) const noexcept {
+        return *reinterpret_cast<const uint64_t*>(this) == \
+            *reinterpret_cast<const uint64_t*>(&o);
+    };
+};
+struct KeyHasher {
+    std::size_t operator()(const IpPort& k) const noexcept {
+        uint64_t val = *reinterpret_cast<const uint64_t*>(&k);
+        return std::hash<uint64_t>{}(val);
+    }
+};
+
+// how we store process : a ref string for its name, and a set a ref strings for its openfiles + networks access (in an out / udp and tcp)
 class Process
 {
     public:
     StringId name;
     unordered_set<StringId> set_files;
+    unordered_map<IpPort,__u32,KeyHasher> map_net;
 };
 
 unordered_map<pid_t, Process> map_process;
@@ -187,6 +214,22 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
                 printf("[%s] pid=%d UDP SND to %d.%d.%d.%d port %d\n",ts,e->pid, \
                        p[0],p[1],p[2],p[3],ntohs(e->ip.dstport));
             }
+            auto itp = map_process.find(e->pid);
+            if (itp == map_process.end())
+                break;
+            IpPort ad{e->ip.srcip,ntohs(e->ip.dstport),KD_OUT};
+            auto ita = itp->second.map_net.find(ad);
+            if (ita != itp->second.map_net.end())
+            {
+                // address already exist in network map of process, so just add +1
+                ita->second++;
+            }
+            else
+            {
+                // need to init (first time)
+                itp->second.map_net.emplace(move(ad),1);
+            }
+            break;
             break;
         }
         case UDP_RCV:
@@ -197,7 +240,22 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
                 __u8 *p=(__u8*)&srcip;
                 
                 printf("[%s] pid=%d UDP RCV from %d.%d.%d.%d on port %d\n",ts,e->pid, \
-                       p[0],p[1],p[2],p[3],ntohs(e->ip.dstport));
+                       p[0],p[1],p[2],p[3],e->ip.dstport);
+            }
+            auto itp = map_process.find(e->pid);
+            if (itp == map_process.end())
+                break;
+            IpPort ad{e->ip.srcip,e->ip.dstport,0};
+            auto ita = itp->second.map_net.find(ad);
+            if (ita != itp->second.map_net.end())
+            {
+                // address already exist in network map of process, so just add +1
+                ita->second++;
+            }
+            else
+            {
+                // need to init (first time)
+                itp->second.map_net.emplace(move(ad),1);
             }
             break;
         }
