@@ -219,7 +219,7 @@ void output_stats_process(pid_t pid)
             case (KD_UDP | KD_IN | KD_MCAST):
             {
                 __u8 *pm=(__u8*)&(ad.ipm);
-                fprintf(fuim,"%3d.%3d;%3d.%3d;%5d;%3d.%3d.%3d.%3d;%d;\n", \
+                fprintf(fuim,"%3d.%3d.%3d.%3d;%5d;%3d.%3d.%3d.%3d;%d;\n", \
                         pm[0],pm[1],pm[2],pm[3],ad.port,                \
                         p[0],p[1],p[2],p[3],cp);
                 break;
