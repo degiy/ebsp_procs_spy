@@ -4,6 +4,9 @@
 #include <signal.h>
 #include <stdio.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 #include <sys/resource.h>
 #include <bpf/libbpf.h>
 #include "i.h"
@@ -26,7 +29,9 @@ unordered_map<string, StringId> map_strings;
 StringId cp_strings=0;
 
 #define KD_TCP 2 // bit mask : 1 for TCP / 0 for UDP
+#define KD_UDP 0
 #define KD_OUT 1 // bit mask : 1 for OUT / 0 for IN
+#define KD_IN  0
 
 // Network class 
 struct alignas(8) IpPort
@@ -114,11 +119,18 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 	return vfprintf(stderr, format, args);
 }
 
+#define printfd(...) \
+    do { \
+        if (env.verbose) { \
+            printf(__VA_ARGS__); \
+        } \
+    } while (0)
+
 static volatile bool exiting = false;
 
 static void sig_handler(int sig)
 {
-    if (env.verbose) printf("signal catched, closing opened pids\n");
+    printfd("signal catched, closing opened pids\n");
 	exiting = true;
 }
 
@@ -130,20 +142,93 @@ void output_stats_process(pid_t pid)
     const string *pstr;
     try { pstr=vec_strings.at(it->second.name); }
     catch(...) { return;}
-    printf("process : %s (pid=%d) :\n",pstr->c_str(),pid);
+
+    // create a dir per process
+    string dir=*pstr;
+    for (char& c : dir) if (c == '/' || c == '.') c = '_';
+    dir+=".";
+    dir+=to_string(pid);
+        
+    if (mkdir(dir.c_str(), 0755) == -1 && errno != EEXIST)
+    {
+        perror("mkdir for process");
+        exit(-1);
+    }
+
+    // and a file with the real filename (cmd launched)
+    string fn=dir+"/name";
+    FILE *f = fopen(fn.c_str(), "w");
+    if (!f) {
+        perror("fopen name of process");
+        exit(-1);
+    }
+    fprintf(f,"%s\n",pstr->c_str());
+    fclose(f);
     
+    // then all the files open by the process
+    fn=dir+"/files.csv";
+    f = fopen(fn.c_str(), "a");
+    if (!f) {
+        perror("fopen list of files");
+        exit(-1);
+    }
     Process& p = it->second;
     for (const auto& id : p.set_files)
     {
         try { pstr=vec_strings.at(id); }
         catch(...) { continue;}
-        printf("  - file : %s\n",pstr->c_str());
+        fprintf(f,"%s\n",pstr->c_str());
     }
+    fclose(f);
+    
+    // then all the udp/tcp flow received/send by process
+    fn=dir+"/udp_in.csv";
+    FILE *fui = fopen(fn.c_str(), "a");
+    if (!fui) { perror("fopen udp in"); exit(-1); }
+
+    fn=dir+"/udp_out.csv";
+    FILE *fuo = fopen(fn.c_str(), "a");
+    if (!fuo) { perror("fopen udp out"); exit(-1); }
+
+    fn=dir+"/tcp_in.csv";
+    FILE *fti = fopen(fn.c_str(), "a");
+    if (!fti) { perror("fopen tcp in"); exit(-1); }
+
+    fn=dir+"/tcp_out.csv";
+    FILE *fto = fopen(fn.c_str(), "a");
+    if (!fto) { perror("fopen tcp out"); exit(-1); }
+    for (const auto& [ad, cp] : p.map_net)
+    {
+        __u8 *p=(__u8*)&(ad.ip);
+        switch (ad.kind)
+        {
+            case (KD_UDP | KD_IN):
+            {
+                fprintf(fui,"%5d;%3d.%3d.%3d.%3d;%d;\n", \
+                       ad.port,p[0],p[1],p[2],p[3],cp);
+                break;
+            };
+            case (KD_UDP | KD_OUT):
+            {
+                fprintf(fuo,"%3d.%3d.%3d.%3d;%5d;%d;\n", \
+                       p[0],p[1],p[2],p[3],ad.port,cp);
+                break;
+            };
+            default:
+            {
+                exit(-1);
+            }
+        }
+    }
+    fclose(fui);
+    fclose(fuo);
+    fclose(fti);
+    fclose(fto);
 }
 
 void close_process()
 {
-    if (env.verbose) printf("processing remaining open process\n");
+    printfd("processing remaining open process\n");
     for (auto const& [pid, _] : map_process)
     {
         output_stats_process(pid);
@@ -165,14 +250,14 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
     {
         case NEW_PROC:
         {
-            if (env.verbose) printf("[%s] new proc : pid=%d, exe=%s\n",ts,e->pid,e->txt);
+            printfd("[%s] new proc : pid=%d, exe=%s\n",ts,e->pid,e->txt);
             auto [it, inserted] = map_strings.emplace(e->txt, cp_strings);
-            if (env.verbose) printf("proc inserted=%d\n",inserted);
+            printfd("proc inserted=%d\n",inserted);
             if (inserted)
             {
                 vec_strings.push_back(&(it->first));
                 ++cp_strings;
-                if (env.verbose) printf ("  new string cp=%d\n",cp_strings);
+                printfd ("  new string cp=%d\n",cp_strings);
             }
             StringId id_s = it->second;
             Process np{.name=id_s};
@@ -181,21 +266,21 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         }
         case FIN_PROC:
         {
-            if (env.verbose) printf("[%s] end proc : pid=%d\n",ts,e->pid);
+            printfd("[%s] end proc : pid=%d\n",ts,e->pid);
             output_stats_process(e->pid);
             map_process.erase(e->pid);
             break;
         }
         case FILE_OPEN:
         {
-            if (env.verbose) printf("[%s] pid=%d opens %s\n",ts,e->pid,e->txt);
+            printfd("[%s] pid=%d opens %s\n",ts,e->pid,e->txt);
             auto [it, inserted] = map_strings.emplace(e->txt, cp_strings);
-            if (env.verbose) printf("file inserted=%d\n",inserted);
+            printfd("file inserted=%d\n",inserted);
             if (inserted)
             {
                 vec_strings.push_back(&(it->first));
                 ++cp_strings;
-                if (env.verbose) printf ("  new string cp=%d\n",cp_strings);
+                printfd ("  new string cp=%d\n",cp_strings);
             }
             StringId id_s = it->second;
             auto itp = map_process.find(e->pid);
@@ -217,7 +302,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
             auto itp = map_process.find(e->pid);
             if (itp == map_process.end())
                 break;
-            IpPort ad{e->ip.srcip,ntohs(e->ip.dstport),KD_OUT};
+            IpPort ad{e->ip.srcip,ntohs(e->ip.dstport),KD_UDP|KD_OUT};
             auto ita = itp->second.map_net.find(ad);
             if (ita != itp->second.map_net.end())
             {
@@ -245,7 +330,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
             auto itp = map_process.find(e->pid);
             if (itp == map_process.end())
                 break;
-            IpPort ad{e->ip.srcip,e->ip.dstport,0};
+            IpPort ad{e->ip.srcip,e->ip.dstport,KD_UDP|KD_IN};
             auto ita = itp->second.map_net.find(ad);
             if (ita != itp->second.map_net.end())
             {
@@ -319,7 +404,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Process events */
-	if (env.verbose) printf("starting to watch process for uid=%d\n",env.uid);
+	printfd("starting to watch process for uid=%d\n",env.uid);
 	while (!exiting) {
 		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
 		/* Ctrl-C will cause -EINTR */
