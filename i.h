@@ -11,6 +11,7 @@ NEW_PROC,
 FIN_PROC,
 FILE_OPEN,
 UDP_SND,
+UDP_RCV_MCAST,
 UDP_RCV,
 TCP_CNX,
 TCP_ACC
@@ -23,7 +24,6 @@ struct event {
         struct {
         __u32 srcip;
         __u32 dstip;
-        __u16 srcport;
         __u16 dstport;
         } ip;
         char txt[MAX_STR];

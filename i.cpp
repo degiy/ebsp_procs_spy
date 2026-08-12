@@ -32,22 +32,32 @@ StringId cp_strings=0;
 #define KD_UDP 0
 #define KD_OUT 1 // bit mask : 1 for OUT / 0 for IN
 #define KD_IN  0
+#define KD_MCAST 4 // just for UDP IN
 
 // Network class 
-struct alignas(8) IpPort
+struct IpPort
 {
     __u32 ip;
+    __u32 ipm;
     __u16 port;
     __u16 kind;
-    bool operator==(const IpPort& o) const noexcept {
-        return *reinterpret_cast<const uint64_t*>(this) == \
-            *reinterpret_cast<const uint64_t*>(&o);
+    bool operator==(const IpPort& o) const noexcept
+    {
+        return memcmp(this, &o, sizeof(IpPort)) == 0;
     };
 };
+
 struct KeyHasher {
     std::size_t operator()(const IpPort& k) const noexcept {
-        uint64_t val = *reinterpret_cast<const uint64_t*>(&k);
-        return std::hash<uint64_t>{}(val);
+        // 64 bits (ip + ipm)  and 32 bits (port + kind)
+        uint64_t p1 = (static_cast<uint64_t>(k.ip) << 32) | k.ipm;
+        uint32_t p2 = (static_cast<uint32_t>(k.port) << 16) | k.kind;
+
+        std::size_t h1 = std::hash<uint64_t>{}(p1);
+        std::size_t h2 = std::hash<uint32_t>{}(p2);
+
+        // style boost::hash_combine
+        return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
     }
 };
 
@@ -186,6 +196,10 @@ void output_stats_process(pid_t pid)
     FILE *fui = fopen(fn.c_str(), "a");
     if (!fui) { perror("fopen udp in"); exit(-1); }
 
+    fn=dir+"/udp_mcast_in.csv";
+    FILE *fuim = fopen(fn.c_str(), "a");
+    if (!fuim) { perror("fopen udp mcast in"); exit(-1); }
+
     fn=dir+"/udp_out.csv";
     FILE *fuo = fopen(fn.c_str(), "a");
     if (!fuo) { perror("fopen udp out"); exit(-1); }
@@ -202,6 +216,14 @@ void output_stats_process(pid_t pid)
         __u8 *p=(__u8*)&(ad.ip);
         switch (ad.kind)
         {
+            case (KD_UDP | KD_IN | KD_MCAST):
+            {
+                __u8 *pm=(__u8*)&(ad.ipm);
+                fprintf(fuim,"%3d.%3d;%3d.%3d;%5d;%3d.%3d.%3d.%3d;%d;\n", \
+                        pm[0],pm[1],pm[2],pm[3],ad.port,                \
+                        p[0],p[1],p[2],p[3],cp);
+                break;
+            };
             case (KD_UDP | KD_IN):
             {
                 fprintf(fui,"%5d;%3d.%3d.%3d.%3d;%d;\n", \
@@ -214,16 +236,30 @@ void output_stats_process(pid_t pid)
                        p[0],p[1],p[2],p[3],ad.port,cp);
                 break;
             };
+            case (KD_TCP | KD_IN):
+            {
+                fprintf(fti,"%5d;%3d.%3d.%3d.%3d;%d;\n", \
+                       ad.port,p[0],p[1],p[2],p[3],cp);
+                break;
+            };
+            case (KD_TCP | KD_OUT):
+            {
+                fprintf(fto,"%3d.%3d.%3d.%3d;%5d;%d;\n", \
+                       p[0],p[1],p[2],p[3],ad.port,cp);
+                break;
+            };
             default:
             {
+                printf("unknown case in ebpf network kind\n");
                 exit(-1);
             }
         }
     }
-    fclose(fui);
-    fclose(fuo);
-    fclose(fti);
     fclose(fto);
+    fclose(fti);
+    fclose(fuo);
+    fclose(fuim);
+    fclose(fui);
 }
 
 void close_process()
@@ -293,8 +329,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         {
             if (env.verbose)
             {
-                __u32 dstip=e->ip.dstip;
-                __u8 *p=(__u8*)&dstip;
+                __u32 ip=e->ip.dstip;
+                __u8 *p=(__u8*)&ip;
                 
                 printf("[%s] pid=%d UDP SND to %d.%d.%d.%d port %d\n",ts,e->pid, \
                        p[0],p[1],p[2],p[3],ntohs(e->ip.dstport));
@@ -302,7 +338,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
             auto itp = map_process.find(e->pid);
             if (itp == map_process.end())
                 break;
-            IpPort ad{e->ip.srcip,ntohs(e->ip.dstport),KD_UDP|KD_OUT};
+            IpPort ad{e->ip.dstip,0,ntohs(e->ip.dstport),KD_UDP|KD_OUT};
             auto ita = itp->second.map_net.find(ad);
             if (ita != itp->second.map_net.end())
             {
@@ -321,16 +357,76 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         {
             if (env.verbose)
             {
-                __u32 srcip=e->ip.srcip;
-                __u8 *p=(__u8*)&srcip;
+                __u32 ip=e->ip.srcip;
+                __u8 *p=(__u8*)&ip;
                 
                 printf("[%s] pid=%d UDP RCV from %d.%d.%d.%d on port %d\n",ts,e->pid, \
+                       p[0],p[1],p[2],p[3],e->ip.dstport);
+                if (e->ip.dstip)
+                {
+                    p=(__u8*)(&e->ip.dstip);
+                    printf("     mcast : %d.%d.%d.%d\n", p[0],p[1],p[2],p[3]);
+                }
+            }
+            auto itp = map_process.find(e->pid);
+            if (itp == map_process.end())
+                break;
+            IpPort ad{e->ip.srcip,e->ip.dstip,e->ip.dstport,KD_UDP|KD_IN};
+            if (e->ip.dstip) ad.kind|=KD_MCAST;
+            auto ita = itp->second.map_net.find(ad);
+            if (ita != itp->second.map_net.end())
+            {
+                // address already exist in network map of process, so just add +1
+                ita->second++;
+            }
+            else
+            {
+                // need to init (first time)
+                itp->second.map_net.emplace(move(ad),1);
+            }
+            break;
+        }
+        case TCP_CNX:
+        {
+            if (env.verbose)
+            {
+                __u32 ip=e->ip.dstip;
+                __u8 *p=(__u8*)&ip;
+                
+                printf("[%s] pid=%d TCP CNX to %d.%d.%d.%d port %d\n",ts,e->pid, \
+                       p[0],p[1],p[2],p[3],ntohs(e->ip.dstport));
+            }
+            auto itp = map_process.find(e->pid);
+            if (itp == map_process.end())
+                break;
+            IpPort ad{e->ip.dstip,0,ntohs(e->ip.dstport),KD_TCP|KD_OUT};
+            auto ita = itp->second.map_net.find(ad);
+            if (ita != itp->second.map_net.end())
+            {
+                // address already exist in network map of process, so just add +1
+                ita->second++;
+            }
+            else
+            {
+                // need to init (first time)
+                itp->second.map_net.emplace(move(ad),1);
+            }
+            break;
+        }
+        case TCP_ACC:
+        {
+            if (env.verbose)
+            {
+                __u32 ip=e->ip.srcip;
+                __u8 *p=(__u8*)&ip;
+                
+                printf("[%s] pid=%d TCP CNX from %d.%d.%d.%d on port %d\n",ts,e->pid, \
                        p[0],p[1],p[2],p[3],e->ip.dstport);
             }
             auto itp = map_process.find(e->pid);
             if (itp == map_process.end())
                 break;
-            IpPort ad{e->ip.srcip,e->ip.dstport,KD_UDP|KD_IN};
+            IpPort ad{e->ip.srcip,0,e->ip.dstport,KD_TCP|KD_IN};
             auto ita = itp->second.map_net.find(ad);
             if (ita != itp->second.map_net.end())
             {
