@@ -371,7 +371,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
             auto itp = map_process.find(e->pid);
             if (itp == map_process.end())
                 break;
-            IpPort ad{e->ip.srcip,e->ip.dstip,e->ip.dstport,KD_UDP|KD_IN};
+            IpPort ad{e->ip.srcip,e->ip.dstip,ntohs(e->ip.dstport),KD_UDP|KD_IN};
             if (e->ip.dstip) ad.kind|=KD_MCAST;
             auto ita = itp->second.map_net.find(ad);
             if (ita != itp->second.map_net.end())
