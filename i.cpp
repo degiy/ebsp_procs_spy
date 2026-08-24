@@ -227,7 +227,8 @@ void output_stats_process(pid_t pid)
             case (KD_UDP | KD_IN):
             {
                 fprintf(fui,"%5d;%3d.%3d.%3d.%3d;%d;\n", \
-                       ad.port,p[0],p[1],p[2],p[3],cp);
+                        ad.port,                \
+                        p[0],p[1],p[2],p[3],cp);
                 break;
             };
             case (KD_UDP | KD_OUT):
@@ -357,22 +358,45 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         {
             if (env.verbose)
             {
-                __u32 ip=e->ip.srcip;
-                __u8 *p=(__u8*)&ip;
+                __u8 *p=(__u8*)&(e->ip.srcip);
+                __u8 *p2=(__u8*)(&e->ip.dstip);
                 
-                printf("[%s] pid=%d UDP RCV from %d.%d.%d.%d on port %d\n",ts,e->pid, \
-                       p[0],p[1],p[2],p[3],e->ip.dstport);
-                if (e->ip.dstip)
-                {
-                    p=(__u8*)(&e->ip.dstip);
-                    printf("     mcast : %d.%d.%d.%d\n", p[0],p[1],p[2],p[3]);
-                }
+                printf("[%s] pid=%d UDP RCV from %d.%d.%d.%d on %d.%d.%d.%d:%d\n",ts,e->pid, \
+                       p[0],p[1],p[2],p[3], \
+                       p2[0],p2[1],p2[2],p2[3],e->ip.dstport);
             }
             auto itp = map_process.find(e->pid);
             if (itp == map_process.end())
                 break;
             IpPort ad{e->ip.srcip,e->ip.dstip,ntohs(e->ip.dstport),KD_UDP|KD_IN};
-            if (e->ip.dstip) ad.kind|=KD_MCAST;
+            auto ita = itp->second.map_net.find(ad);
+            if (ita != itp->second.map_net.end())
+            {
+                // address already exist in network map of process, so just add +1
+                ita->second++;
+            }
+            else
+            {
+                // need to init (first time)
+                itp->second.map_net.emplace(move(ad),1);
+            }
+            break;
+        }
+        case UDP_RCV_MCAST:
+        {
+            if (env.verbose)
+            {
+                __u8 *p=(__u8*)&(e->ip.srcip);
+                __u8 *p2=(__u8*)(&e->ip.dstip);
+                
+                printf("[%s] pid=%d UDP mcast RCV from %d.%d.%d.%d on %d.%d.%d.%d:%d\n",ts,e->pid, \
+                       p[0],p[1],p[2],p[3], \
+                       p2[0],p2[1],p2[2],p2[3],e->ip.dstport);
+            }
+            auto itp = map_process.find(e->pid);
+            if (itp == map_process.end())
+                break;
+            IpPort ad{e->ip.srcip,e->ip.dstip,ntohs(e->ip.dstport),KD_UDP|KD_IN|KD_MCAST};
             auto ita = itp->second.map_net.find(ad);
             if (ita != itp->second.map_net.end())
             {
